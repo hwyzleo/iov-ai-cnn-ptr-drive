@@ -30,3 +30,22 @@
 *.exe
 *.out
 *.app
+
+# IDE
+.idea/
+
+# debug目录
+cmake-build-debug/
+
+# 编译目录
+build
+
+# 数据集
+datasets/dataset
+datasets/validate
+
+# 模型
+models/model.pt
+
+# 执行文件
+ptr
