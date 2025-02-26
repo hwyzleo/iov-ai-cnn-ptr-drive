@@ -3,6 +3,7 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
 #include <memory>
+#include <filesystem>
 
 int main() {
     try {
@@ -29,10 +30,24 @@ int main() {
         module.eval();
 
         // 打开视频文件
-        cv::VideoCapture cap("datasets/validate/test_video.mp4");
-        if (!cap.isOpened()) {
-            std::cerr << "无法打开视频文件\n";
-            return -1;
+        std::string videoPath = std::filesystem::absolute("datasets/validate/test_video.mp4").string();
+        cv::VideoCapture cap;
+        // 设置硬件加速
+#if CV_VERSION_MAJOR >= 4
+        // OpenCV 4.0及以上版本支持硬件加速
+    cap.set(cv::CAP_PROP_HW_ACCELERATION, cv::VIDEO_ACCELERATION_ANY);
+#endif
+        // 设置解码器
+        cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('H', '2', '6', '4'));
+        // 设置缓冲区大小
+        cap.set(cv::CAP_PROP_BUFFERSIZE, 3);
+        if (!cap.open(videoPath, cv::CAP_FFMPEG)) {
+            std::cerr << "使用FFMPEG后端打开视频失败\n";
+            // 尝试使用默认后端
+            if (!cap.open(videoPath)) {
+                std::cerr << "使用默认后端也无法打开视频\n";
+                return -1;
+            }
         }
 
         // 获取视频的基本信息
