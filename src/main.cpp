@@ -131,7 +131,7 @@ int process(const std::string &videoPath) {
 
     // 创建会话选项
     Ort::SessionOptions session_options;
-    session_options.SetIntraOpNumThreads(1);
+    session_options.SetIntraOpNumThreads(4);
     session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
     // 设置使用的执行提供程序（默认为CPU）
@@ -194,19 +194,21 @@ int process(const std::string &videoPath) {
         // std::cout << "调整图片帧类型: " << float_frame.type() << "\n";
 
         // 重新排列BGR通道为RGB
-        cv::Mat channels[3];
-        cv::split(float_frame, channels);
+        cv::cvtColor(float_frame, float_frame, cv::COLOR_BGR2RGB);
 
-        // 准备输入数据 (NCHW格式)
-        size_t input_tensor_size = 1 * 3 * 360 * 360;
-        std::vector<float> input_tensor_values(input_tensor_size);
+        // 准备输入数据（更高效的HWC到CHW转换）
+        std::vector<float> input_tensor_values(1 * 3 * 360 * 360);
+        float* tensor_data = input_tensor_values.data();
 
-        // 填充数据 (CHW格式)
-        int channel_length = 360 * 360;
-        for (int c = 0; c < 3; c++) {
-            cv::Mat channel = channels[2 - c]; // BGR to RGB
-            std::memcpy(input_tensor_values.data() + c * channel_length,
-                       channel.data, channel_length * sizeof(float));
+        // 优化的CHW转换 - 避免通道分离和多次内存复制
+        int height = 360, width = 360;
+        for (int h = 0; h < height; h++) {
+            for (int w = 0; w < width; w++) {
+                const float* pixel = float_frame.ptr<float>(h, w);
+                for (int c = 0; c < 3; c++) {
+                    tensor_data[c * height * width + h * width + w] = pixel[c];
+                }
+            }
         }
 
         // 定义输入形状
@@ -215,7 +217,7 @@ int process(const std::string &videoPath) {
         // 创建输入tensor
         auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-            memory_info, input_tensor_values.data(), input_tensor_size,
+            memory_info, input_tensor_values.data(), input_tensor_values.size(),
             input_shape.data(), input_shape.size());
 
         // 获取输出节点名称
