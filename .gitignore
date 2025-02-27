@@ -46,6 +46,7 @@ datasets/validate
 
 # 模型
 models/model.pt
+models/model.onnx
 
 # 执行文件
 ptr
