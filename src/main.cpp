@@ -38,9 +38,34 @@ void printCurrentTime() {
     std::cout << "当前时间: " << std::put_time(std::localtime(&now_time), "%Y-%m-%d %H:%M:%S") << std::endl;
 }
 
+void printSystemArchitecture() {
+    std::cout << "系统架构: ";
+
+#if defined(__x86_64__) || defined(_M_X64)
+    std::cout << "x86_64 (64位)" << std::endl;
+#elif defined(__i386) || defined(_M_IX86)
+    std::cout << "x86 (32位)" << std::endl;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    std::cout << "ARM64" << std::endl;
+#elif defined(__arm__) || defined(_M_ARM)
+    std::cout << "ARM" << std::endl;
+#elif defined(__powerpc64__) || defined(__ppc64__)
+        std::cout << "PowerPC 64位" << std::endl;
+#elif defined(__powerpc__) || defined(__ppc__)
+        std::cout << "PowerPC 32位" << std::endl;
+#else
+        std::cout << "未知架构" << std::endl;
+#endif
+}
+
 #ifdef TENSORRT_AVAILABLE
 int process(const std::string &videoPath) {
     std::cout << "使用 TensorRT 进行推理\n";
+    std::cout << "TensorRT版本: "
+                  << NV_TENSORRT_MAJOR << "."
+                  << NV_TENSORRT_MINOR << "."
+                  << NV_TENSORRT_PATCH << "."
+                  << NV_TENSORRT_BUILD << std::endl;
 
     // 创建自定义Logger
     class Logger : public nvinfer1::ILogger {
@@ -156,6 +181,9 @@ int process(const std::string &videoPath) {
     cudaMalloc(&deviceInputBuffer, inputSize);
     cudaMalloc(&deviceOutputBuffer, outputSize);
 
+    // 创建绑定数组，用于executeV2
+    std::vector<void*> bindings = {deviceInputBuffer, deviceOutputBuffer};
+    
     cv::VideoCapture cap;
     // 设置解码器
     cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('H', '2', '6', '4'));
@@ -214,31 +242,42 @@ int process(const std::string &videoPath) {
         cudaMemcpy(deviceInputBuffer, hostInputBuffer.data(), inputSize, cudaMemcpyHostToDevice);
 
         // 执行推理
-        context->setTensorAddress(inputName, deviceInputBuffer);
-        context->setTensorAddress(outputName, deviceOutputBuffer);
-        bool status = context->executeV2(0); // 使用TensorRT 10的executeV2，传入batchSize为0表示使用默认值
+        bool status = context->executeV2(bindings.data());
         if (!status) {
             std::cerr << "执行推理失败\n";
             continue;
         }
-        std::cout << "执行推理\n";
 
         // 将结果从GPU复制回CPU
         cudaMemcpy(hostOutputBuffer.data(), deviceOutputBuffer, outputSize, cudaMemcpyDeviceToHost);
 
         // 处理结果
-        // 找到最高置信度的类别
-        int max_idx = 0;
-        float max_val = hostOutputBuffer[0];
-        for (size_t i = 1; i < hostOutputBuffer.size(); i++) {
-            if (hostOutputBuffer[i] > max_val) {
-                max_val = hostOutputBuffer[i];
-                max_idx = i;
-            }
+        // 首先找出最大值(用于数值稳定性)
+        float max_val = *std::max_element(hostOutputBuffer.begin(), hostOutputBuffer.end());
+
+        // 计算softmax
+        std::vector<float> probabilities(hostOutputBuffer.size());
+        float sum_exp = 0.0f;
+
+        std::transform(hostOutputBuffer.begin(), hostOutputBuffer.end(), probabilities.begin(),
+            [max_val, &sum_exp](float val) {
+                float exp_val = std::exp(val - max_val);
+                sum_exp += exp_val;
+                return exp_val;
+            });
+
+        // 归一化为概率
+        for (auto& prob : probabilities) {
+            prob /= sum_exp;
         }
 
+        // 找到最大概率及其索引
+        auto max_it = std::max_element(probabilities.begin(), probabilities.end());
+        int max_idx = std::distance(probabilities.begin(), max_it);
+        float max_prob = *max_it;
+
         std::cout << "帧 " << frame_count << " 预测索引值: " << max_idx
-                  << ", 信心值: " << max_val << "\n";
+                  << ", 信心值: " << max_prob << "\n";
 
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -395,28 +434,30 @@ int process(const std::string &videoPath) {
         // 获取输出数据
         float* output_data = output_tensors[0].GetTensorMutableData<float>();
 
-        // 获取输出的形状
-//        auto output_shape = output_tensors[0].GetTensorTypeAndShapeInfo().GetShape();
-//        std::cout << "输出形状: ";
-//        for (size_t i = 0; i < output_shape.size(); i++) {
-//            std::cout << output_shape[i] << " ";
-//        }
-//        std::cout << std::endl;
-
         // 处理输出数据 - 查找最大值和对应索引
         size_t count = output_tensors[0].GetTensorTypeAndShapeInfo().GetElementCount();
         if (count > 0) {
-            float max_val = output_data[0];
-            int max_idx = 0;
+            // 应用softmax并找出最大概率
+            std::vector<float> probs(count);
+            float sum_exp = 0.0f;
+            float max_val = *std::max_element(output_data, output_data + count);
 
-            for (size_t i = 1; i < count; i++) {
-                if (output_data[i] > max_val) {
-                    max_val = output_data[i];
-                    max_idx = i;
-                }
+            for (size_t i = 0; i < count; i++) {
+                probs[i] = std::exp(output_data[i] - max_val);
+                sum_exp += probs[i];
             }
+
+            for (size_t i = 0; i < count; i++) {
+                probs[i] /= sum_exp;
+            }
+
+            // 找到最大概率及其索引
+            auto max_it = std::max_element(probs.begin(), probs.end());
+            int max_idx = std::distance(probs.begin(), max_it);
+            float max_prob = *max_it;
+
             std::cout << "帧 " << frame_count << " 预测索引值: " << max_idx
-                      << ", 信心值: " << max_val << "\n";
+                      << ", 信心值: " << max_prob << "\n";
         }
 
         auto end = std::chrono::high_resolution_clock::now();
@@ -431,6 +472,10 @@ int process(const std::string &videoPath) {
 #ifdef LIBTORCH_AVAILABLE
 int process(const std::string &videoPath) {
     std::cout << "使用 LibTorch 推理\n";
+    std::cout << "LibTorch版本: "
+              << TORCH_VERSION_MAJOR << "."
+              << TORCH_VERSION_MINOR << "."
+              << TORCH_VERSION_PATCH << std::endl;
 
     try {
         // 设置线程数，避免过度使用
@@ -442,7 +487,7 @@ int process(const std::string &videoPath) {
         try {
             // 确保路径正确
             module = torch::jit::load("models/model.pt");
-            std::cout << "模型加载成功\n";
+            std::cout << "推理模型地址: " << "models/model.pt" << std::endl;
             for (const auto &param: module.parameters()) {
                 // std::cout << "Parameter device: " << param.device() << "\n";
             }
@@ -536,10 +581,13 @@ int process(const std::string &videoPath) {
             // 执行推理
             auto output = module.forward(inputs).toTensor();
 
+            // 应用softmax处理
+            auto softmax_output = torch::softmax(output, 1);  // 沿类别维度应用softmax
+
             // 获取预测结果
-            auto max_result = output.max(1);
-            auto max_index = std::get < 1 > (max_result).item<int64_t>();
-            auto probability = std::get < 0 > (max_result).item<float>();
+            auto max_result = softmax_output.max(1);
+            auto max_index = std::get<1>(max_result).item<int64_t>();
+            auto probability = std::get<0>(max_result).item<float>();
 
             std::cout << "帧 " << frame_count << " 预测索引值: " << max_index
                       << ", 信心值: " << probability << "\n";
@@ -566,9 +614,10 @@ int process(const std::string &videoPath) {
 
 int main() {
     try {
+        printSystemArchitecture();
         std::cout << "OpenCV版本: " << CV_VERSION << std::endl;
         std::cout << "OpenCV对FFMPEG支持: " << (cv::getBuildInformation().find("FFMPEG") > 0) << std::endl;
-        std::cout << "获取FFMPEG版本:" <<  std::endl;
+        std::cout << "获取FFMPEG版本:" << std::endl;
         int result = system("ffmpeg -version | head -n 1");
         if (result != 0) {
             std::cout << "无法执行ffmpeg命令或获取版本信息" << std::endl;
