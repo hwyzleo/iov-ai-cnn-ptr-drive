@@ -99,39 +99,60 @@ int process(const std::string &videoPath) {
     }
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 30);
 
-    // 创建ONNX解析器
-    auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gLogger));
-    if (!parser) {
-        std::cerr << "创建解析器失败" << std::endl;
-        return -1;
-    }
-
-    // 解析ONNX模型
-    std::string modelPath = "models/model_int32.onnx";
-    std::cout << "推理模型地址: " << "models/model_int32.onnx" << std::endl;
-    bool parsed = parser->parseFromFile(modelPath.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING));
-    if (!parsed) {
-        std::cerr << "解析ONNX模型失败" << "models/model_int32.onnx" << std::endl;
-        return -1;
-    }
-
-    // 构建引擎
-    auto plan = std::unique_ptr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
-    if (!plan) {
-        std::cerr << "创建序列化网络失败" << std::endl;
-        return -1;
-    }
-
     auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
     if (!runtime) {
         std::cerr << "创建运行时失败" << std::endl;
         return -1;
     }
 
-    auto engine = std::unique_ptr<nvinfer1::ICudaEngine>(runtime->deserializeCudaEngine(plan->data(), plan->size()));
-    if (!engine) {
-        std::cerr << "创建引擎失败" << std::endl;
-        return -1;
+    // 读取 TensorRT 模型文件
+    std::unique_ptr<nvinfer1::ICudaEngine> engine;
+    std::ifstream engineFile("models/model.trt", std::ios::binary);
+    if (!engineFile) {
+        // 创建ONNX解析器
+        auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gLogger));
+        if (!parser) {
+            std::cerr << "创建解析器失败" << std::endl;
+            return -1;
+        }
+
+        // 解析ONNX模型
+        std::string modelPath = "models/model_int32.onnx";
+        std::cout << "推理模型地址: " << "models/model_int32.onnx" << std::endl;
+        bool parsed = parser->parseFromFile(modelPath.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING));
+        if (!parsed) {
+            std::cerr << "解析ONNX模型失败" << "models/model_int32.onnx" << std::endl;
+            return -1;
+        }
+
+        // 构建引擎
+        auto plan = std::unique_ptr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
+        if (!plan) {
+            std::cerr << "创建序列化网络失败" << std::endl;
+            return -1;
+        }
+
+        engine.reset(runtime->deserializeCudaEngine(plan->data(), plan->size()));
+        if (!engine) {
+            std::cerr << "创建引擎失败" << std::endl;
+            return -1;
+        }
+    } else {
+        std::cout << "推理模型地址: " << "models/model.trt" << std::endl;
+        engineFile.seekg(0, engineFile.end);
+        size_t size = engineFile.tellg();
+        engineFile.seekg(0, engineFile.beg);
+
+        std::vector<char> engineData(size);
+        engineFile.read(engineData.data(), size);
+        engineFile.close();
+
+        // 反序列化 TensorRT 引擎
+        engine.reset(runtime->deserializeCudaEngine(engineData.data(), size));
+        if (!engine) {
+            std::cerr << "创建引擎失败" << std::endl;
+            return -1;
+        }
     }
 
     // 创建执行上下文

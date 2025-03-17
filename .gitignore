@@ -48,6 +48,7 @@ datasets/validate
 models/model.pt
 models/model.onnx
 models/model_int32.onnx
+models/model.trt
 
 # 执行文件
 ptr
