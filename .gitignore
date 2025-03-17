@@ -49,6 +49,7 @@ models/model.pt
 models/model.onnx
 models/model_int32.onnx
 models/model.trt
+models/model_int32.trt
 
 # 执行文件
 ptr
