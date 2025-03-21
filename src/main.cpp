@@ -11,6 +11,7 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
+#include <regex>
 
 #ifdef TENSORRT_AVAILABLE
 #include "NvInfer.h"
@@ -97,7 +98,13 @@ int process(const std::string &videoPath) {
         std::cerr << "创建builder配置失败" << std::endl;
         return -1;
     }
-    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 30);
+    size_t workspaceSize = 1 << 32; // 4GB
+    config->setMaxWorkspaceSize(workspaceSize);
+    std::cout << "设置Workspace大小: " << workspaceSize << " bytes" << std::endl;
+
+    size_t free, total;
+    cudaMemGetInfo(&free, &total);
+    std::cout << "设置Workspace为 " << workspaceSize << " bytes（可用显存: " << free/(1024*1024) << "MB）" << std::endl;
 
     auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
     if (!runtime) {
@@ -124,6 +131,7 @@ int process(const std::string &videoPath) {
             std::cerr << "解析ONNX模型失败" << "models/model_int32.onnx" << std::endl;
             return -1;
         }
+        std::cout << "解析ONNX模型成功" << std::endl;
 
         // 构建引擎
         auto plan = std::unique_ptr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
@@ -131,12 +139,14 @@ int process(const std::string &videoPath) {
             std::cerr << "创建序列化网络失败" << std::endl;
             return -1;
         }
+        std::cout << "创建序列化网络成功" << std::endl;
 
         engine.reset(runtime->deserializeCudaEngine(plan->data(), plan->size()));
         if (!engine) {
             std::cerr << "创建引擎失败" << std::endl;
             return -1;
         }
+        std::cout << "创建引擎成功" << std::endl;
     } else {
         std::cout << "推理模型地址: " << "models/model.trt" << std::endl;
         engineFile.seekg(0, engineFile.end);
@@ -163,12 +173,13 @@ int process(const std::string &videoPath) {
     }
 
     // 获取输入和输出信息
-    int nbInputs = engine->getNbIOTensors();
+    int nbBindings = engine->getNbBindings();
+    std::cout << "绑定数量: " << nbBindings << std::endl;
     std::vector<const char*> tensorNames;
 
     // 收集所有输入/输出张量名称
-    for (int i = 0; i < nbInputs; i++) {
-        tensorNames.push_back(engine->getIOTensorName(i));
+    for (int i = 0; i < nbBindings; i++) {
+        tensorNames.push_back(engine->getBindingName(i));
     }
 
     // 假设第一个是输入，最后一个是输出（根据实际模型调整）
@@ -176,8 +187,10 @@ int process(const std::string &videoPath) {
     const char* outputName = tensorNames[tensorNames.size() - 1];
 
     // 获取输入和输出维度
-    nvinfer1::Dims inputDims = engine->getTensorShape(inputName);
-    nvinfer1::Dims outputDims = engine->getTensorShape(outputName);
+    int inputIndex = engine->getBindingIndex(inputName);
+    int outputIndex = engine->getBindingIndex(outputName);
+    nvinfer1::Dims inputDims = engine->getBindingDimensions(inputIndex);
+    nvinfer1::Dims outputDims = engine->getBindingDimensions(outputIndex);
 
     // 计算输入和输出大小
     size_t inputSize = 1;
@@ -199,8 +212,14 @@ int process(const std::string &videoPath) {
     // 创建GPU端缓冲区
     void* deviceInputBuffer = nullptr;
     void* deviceOutputBuffer = nullptr;
-    cudaMalloc(&deviceInputBuffer, inputSize);
-    cudaMalloc(&deviceOutputBuffer, outputSize);
+    if (cudaMalloc(&deviceInputBuffer, inputSize) != cudaSuccess) {
+        std::cerr << "CUDA内存分配失败: deviceInputBuffer" << std::endl;
+        return -1;
+    }
+    if (cudaMalloc(&deviceOutputBuffer, outputSize) != cudaSuccess) {
+        std::cerr << "CUDA内存分配失败: deviceOutputBuffer" << std::endl;
+        return -1;
+    }
 
     // 创建绑定数组，用于executeV2
     std::vector<void*> bindings = {deviceInputBuffer, deviceOutputBuffer};
@@ -214,7 +233,7 @@ int process(const std::string &videoPath) {
         std::cout << "使用FFMPEG后端打开视频:" << videoPath << "失败\n";
         std::cout << "错误码: " << cap.get(cv::CAP_PROP_FOURCC) << std::endl;
         // 尝试使用默认后端
-        if (!cap.open(videoPath)) {
+        if (!cap.open(videoPath, cv::CAP_ANY)) {
             std::cerr << "使用默认后端也无法打开视频\n";
             return -1;
         }
@@ -637,7 +656,9 @@ int main() {
     try {
         printSystemArchitecture();
         std::cout << "OpenCV版本: " << CV_VERSION << std::endl;
-        std::cout << "OpenCV对FFMPEG支持: " << (cv::getBuildInformation().find("FFMPEG") > 0) << std::endl;
+        std::cout << cv::getBuildInformation() << std::endl;
+        std::regex pattern(R"(FFMPEG:\s+YES)", std::regex_constants::icase);
+        std::cout << "OpenCV对FFMPEG支持: " << (std::regex_search(cv::getBuildInformation(), pattern)) << std::endl;
         std::cout << "获取FFMPEG版本:" << std::endl;
         int result = system("ffmpeg -version | head -n 1");
         if (result != 0) {

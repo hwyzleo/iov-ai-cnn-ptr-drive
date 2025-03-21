@@ -51,5 +51,8 @@ models/model_int32.onnx
 models/model.trt
 models/model_int32.trt
 
+# 交叉编译文件
+aarch64_toolchain.cmake
+
 # 执行文件
 ptr
